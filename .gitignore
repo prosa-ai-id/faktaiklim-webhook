@@ -1,0 +1,4 @@
+.env
+.env.prod
+hoax_api_result_example.json
+logs

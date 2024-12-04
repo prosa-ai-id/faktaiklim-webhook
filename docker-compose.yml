@@ -1,0 +1,60 @@
+version: '2.2'
+
+x-common-variables: &env
+  - TELEGRAM_API_ADDRESS=https://api.telegram.org
+  - TELEGRAM_TOKEN=5062200811:AAEjmvqknnW4wcE--jlwy3g6qS_u1al82PE
+
+  # - HOAX_CHECK_API=http://10.181.131.250:8091/check
+  - HOAX_CHECK_API=http://climate-api:8091/check
+  - HOAX_API_KEY=ebce2698dadf0593c979a2798c84e49a0
+
+  # - TOPIC_SERVING_URL=http://10.181.131.250:8897/forward
+  - TOPIC_SERVING_URL=http://topic-cls/forward
+  # - SUBTOPIC_SERVING_URL=http://10.181.131.250:8898/forward
+  - SUBTOPIC_SERVING_URL=http://subtopic-cls/forward
+
+  - RABBITMQ_HOST=rabbitmq
+  - RABBITMQ_PORT=5672
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.9-management
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 3s
+      timeout: 30s
+      retries: 20
+    networks:
+      - giz
+
+  webhook:
+    image: registry.gitlab.prosa.ai/prosa-ai/nlp/giz/giz-telegram-webhook:0.0.6
+    ports:
+      - 8711:8711
+    environment: *env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: bash -c "sleep 10 && python -m app.bot"
+    networks:
+      - giz
+
+  processor:
+    image: registry.gitlab.prosa.ai/prosa-ai/nlp/giz/giz-telegram-webhook:0.0.6
+    environment: *env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    command: bash -c "sleep 10 && python -m app.receive 1"
+    networks:
+      - giz
+
+networks:
+  giz:
+    external: true

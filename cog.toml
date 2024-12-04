@@ -1,0 +1,13 @@
+pre_bump_hooks = [
+  "sed -i 's#image: registry.gitlab.prosa.ai/prosa-ai/nlp/giz/giz-telegram-webhook:.*#image: registry.gitlab.prosa.ai/prosa-ai/nlp/giz/giz-telegram-webhook:{{version}}#' docker-compose.yml",
+]
+
+
+post_bump_hooks = ["git push", "git push origin {{version}}"]
+
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "gitlab.prosa.ai"
+owner = "prosa-ai/nlp/giz"
+repository = "giz-telegram-webhook"

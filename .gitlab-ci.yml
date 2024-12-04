@@ -1,0 +1,19 @@
+image: docker:cli
+
+stages:
+  - build
+
+variables:
+  IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME"
+
+build_tag:
+  stage: build
+  before_script:
+    - echo $CI_REGISTRY_PASSWORD | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  script:
+    - docker buildx build -t $IMAGE .
+    - docker push $IMAGE
+  tags:
+    - prosa-dgx-3
+  only:
+    - tags
