@@ -14,6 +14,8 @@ class Config(BaseSettings):
     TOPIC_SERVING_URL: str
     SUBTOPIC_SERVING_URL: str
 
+    DB_PATH: str
+
     class Config:
         env_file = ".env"
 

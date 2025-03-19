@@ -2,16 +2,17 @@
 import datetime as dt
 import json
 import os
-import random
 import sys
 import time
 from multiprocessing import Pool
+from urllib.parse import quote
 
 import pika
 import requests
 
 from app.config import settings
-from app.topic import get_topic
+from app.database import log_article_search
+from app.topic import get_topic_combined
 
 with open("./app/resources/welcome.html") as f:
     welcome_message = f.read().strip()
@@ -59,17 +60,16 @@ class TelegramReceive:
         return file_path
 
     def get_bing(self, query):
-        q = "+".join(query.split())
-        bing_url = f"https://bing.com/search?q={q}"
-        return bing_url
+        cleaned_query = query.strip().rstrip("'")
+        encoded_query = quote(cleaned_query)
+        bing_url = f"https://bing.com/search?q={encoded_query}"
+        # Format URL for Telegram HTML parsing while showing the URL
+        return f'<a href="{bing_url}">{bing_url}</a>'
 
     def get_docstring(self, docs):
         result = ""
         for i, d in enumerate(docs):
-            verdict = "FACT"
-            if "classification" in d:
-                verdict = d["classification"]
-            result += f"{str(i+1)}. ({verdict}) {d['title']}\n"
+            result += f"{str(i + 1)}. {d['title']}\n"
             if "url" in d:
                 url = d["url"]
             else:
@@ -90,14 +90,27 @@ class TelegramReceive:
             )
         else:
             answer_str = f"Climate Category: {topic}\n"
+            verdict_str = ""
+            if hoax_probability <= 0.01:
+                verdict_str = "tidak terdeteksi sebagai hoaks"
+            elif hoax_probability <= 0.5:
+                verdict_str = "kemungkinan kecil berpotensi sebagai hoaks"
+            elif hoax_probability <= 0.8:
+                verdict_str = "cenderung berpotensi sebagai hoaks"
+            else:
+                verdict_str = "kemungkinan besar berpotensi sebagai hoaks"
             if verdict_flag == "FACT":
                 answer_str = (
-                    fact_message.format(topic=topic, articles=articles),
+                    fact_message.format(
+                        topic=topic, articles=articles, verdict_str=verdict_str
+                    ),
                     "HTML",
                 )
             elif verdict_flag == "HOAX":
                 answer_str = (
-                    hoax_message.format(topic=topic, articles=articles),
+                    hoax_message.format(
+                        topic=topic, articles=articles, verdict_str=verdict_str
+                    ),
                     "HTML",
                 )
             # answer_str += "\n" + docstring
@@ -127,21 +140,71 @@ class TelegramReceive:
             "content-type": "application/json",
             "x-api-key": settings.HOAX_API_KEY.get_secret_value(),
         }
-        r = requests.post(
-            settings.HOAX_CHECK_API, json.dumps({"text": text}), headers=headers
-        )
-        if r is None:
-            return "mohon maaf, saya sedang tidak tersambung dengan Sistem Anti Hoax Climate, mohon tunggu beberapa saat lagi"
-        result = r.json()
 
-        if "relevant_items" not in result:
-            print(f"ERROR: no 'relevant_items' IN HOAX API RESPONSE: {result}")
-            result = {"relevant_items": [], "hoax_probability": 0}
+        try:
+            r = requests.post(
+                settings.HOAX_CHECK_API, json.dumps({"text": text}), headers=headers
+            )
 
-        verdict = self.get_verdict_flag(result)
-        topic = get_topic(text)
-        answer = self.generate_answer_str(result, verdict, text, topic)
-        return answer
+            if r is None:
+                log_article_search(
+                    user_id=chat_id,
+                    search_query=text,
+                    status="error",
+                    hoax_probability=None,
+                    topic=None,
+                    response_json=None,
+                )
+                return "Mohon maaf, Saya sedang tidak tersambung dengan Sistem Anti Hoax Climate, mohon tunggu beberapa saat lagi."
+
+            result = r.json()
+
+            # ChitChat
+            if "chitchat_answer" in result and result["chitchat_answer"]:
+                log_article_search(
+                    user_id=chat_id,
+                    search_query=text,
+                    status="chitchat",
+                    hoax_probability=None,
+                    topic=None,
+                    response_json=result,
+                )
+                return result["chitchat_answer"]
+
+            if "relevant_items" not in result:
+                print(f"ERROR: no 'relevant_items' IN HOAX API RESPONSE: {result}")
+                result = {"relevant_items": [], "hoax_probability": 0}
+
+            verdict = self.get_verdict_flag(result)
+
+            # Get both topic string and data with a single API call
+            topic, topic_data = get_topic_combined(text)
+
+            # Log the successful API call
+            log_article_search(
+                user_id=chat_id,
+                search_query=text,
+                status="success",
+                hoax_probability=result.get("hoax_probability", 0),
+                topic=topic,
+                response_json={"result": topic_data},
+            )
+
+            answer = self.generate_answer_str(result, verdict, text, topic)
+            return answer
+
+        except Exception as e:
+            # Log the error
+            log_article_search(
+                user_id=chat_id,
+                search_query=text,
+                status="error",
+                hoax_probability=None,
+                topic=None,
+                response_json={"error": str(e)},
+            )
+            print(f"Error in get_verdict: {e}")
+            return "Mohon maaf, terjadi kesalahan dalam sistem kami. Silakan coba beberapa saat lagi."
 
     def prepare_data_for_answer(self, data):
         chat_id = int(data.split("+++")[0][2:])
@@ -182,63 +245,94 @@ failedcount, successcount = 0, 0
 def callback(ch, method, properties, text):
     global failedcount, successcount
     tr = TelegramReceive()
-    t = str(text)
-    print(f"RECEIVED FROM QUEUE {t}")
-    answer_data = tr.prepare_data_for_answer(t)
-    r = tr.send_message(answer_data)
-    i = 0
-    # ch.basic_ack(delivery_tag = method.delivery_tag)
-    while r.status_code == 429 and i <= 2:
-        print("resend")
-        time.sleep(0.1)
-        r = tr.send_message(answer_data)
-        i += 1
-    else:
-        if r.status_code == 429:
-            # repush message to queue
-            print("repush")
-            failedcount += 1
-            connection = pika.BlockingConnection(
-                pika.ConnectionParameters(
-                    host=settings.RABBITMQ_HOST,
-                    port=settings.RABBITMQ_PORT,
-                )
-            )
-            channel = connection.channel()
-            channel.queue_declare(queue="hoaxintel")
-            channel.basic_publish(exchange="", routing_key="hoaxintel", body=text)
-            connection.close()
-        else:
-            successcount += 1
-    # Write query to log
-    message_log_fname = "./logs/message_log.tsv"
-    f = None
-    if not os.path.exists(f"{message_log_fname}"):
-        row = "chat_id\tmessage\tanswer\tstatus_code\tdatetime\n"
-        f = open(message_log_fname, "a")
-        f.write(row)
-    else:
-        f = open(message_log_fname, "a")
+    try:
+        t = str(text)
+        print(f"RECEIVED FROM QUEUE {t}")
+        # Extract chat_id early for error handling
+        chat_id = t.split("+++")[0][2:]
 
-    chat_id = t.split("+++")[0][2:]
-    message = '"' + t.split("+++")[1][:-1] + '"'
-    answer = '"' + answer_data["text"] + '"'
-    datetime = "T".join(str(dt.datetime.now()).split())
-    row = (
-        chat_id
-        + "\t"
-        + message
-        + "\t"
-        + answer
-        + "\t"
-        + str(r.status_code)
-        + "\t"
-        + datetime
-        + "\n"
-    )
-    f.write(row)
-    f.close()
-    print(f"success count {successcount}, failed count {failedcount}")
+        answer_data = tr.prepare_data_for_answer(t)
+        r = tr.send_message(answer_data)
+        i = 0
+
+        while r.status_code == 429 and i <= 2:
+            print("resend")
+            time.sleep(0.1)
+            r = tr.send_message(answer_data)
+            i += 1
+        else:
+            if r.status_code == 429:
+                # repush message to queue
+                print("repush")
+                failedcount += 1
+                connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=settings.RABBITMQ_HOST,
+                        port=settings.RABBITMQ_PORT,
+                    )
+                )
+                channel = connection.channel()
+                channel.queue_declare(queue="hoaxintel")
+                channel.basic_publish(exchange="", routing_key="hoaxintel", body=text)
+                connection.close()
+            else:
+                successcount += 1
+
+        # Write query to log
+        message_log_fname = "./logs/message_log.tsv"
+        f = None
+        if not os.path.exists(f"{message_log_fname}"):
+            row = "chat_id\tmessage\tanswer\tstatus_code\tdatetime\n"
+            f = open(message_log_fname, "a")
+            f.write(row)
+        else:
+            f = open(message_log_fname, "a")
+
+        message = '"' + t.split("+++")[1][:-1] + '"'
+        answer = '"' + answer_data["text"] + '"'
+        datetime = "T".join(str(dt.datetime.now()).split())
+        row = (
+            chat_id
+            + "\t"
+            + message
+            + "\t"
+            + answer
+            + "\t"
+            + str(r.status_code)
+            + "\t"
+            + datetime
+            + "\n"
+        )
+        f.write(row)
+        f.close()
+        print(f"success count {successcount}, failed count {failedcount}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        try:
+            # Try to send error message to the user using the already extracted chat_id
+            error_data = {
+                "chat_id": chat_id,  # We extracted this at the start of the try block
+                "text": "Maaf terjadi kesalahan dalam sistem kami, silakan coba beberapa saat lagi.",
+                "parse_mode": None,
+            }
+            tr.send_message(error_data)
+
+            # Log the error
+            message_log_fname = "./logs/message_log.tsv"
+            with open(message_log_fname, "a") as f:
+                datetime = "T".join(str(dt.datetime.now()).split())
+                error_row = (
+                    f'{chat_id}\t"ERROR"\t"System Error: {str(e)}"\t500\t{datetime}\n'
+                )
+                f.write(error_row)
+
+            failedcount += 1
+
+        except Exception as inner_e:
+            # If even error handling fails, just log it
+            print(f"Failed to handle error: {inner_e}")
+            failedcount += 1
 
 
 def receiver(callback):

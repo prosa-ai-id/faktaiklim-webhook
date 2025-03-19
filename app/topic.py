@@ -1,7 +1,8 @@
 import json
-from typing import List
+from typing import Dict, List, Tuple
 
 from requests import post
+
 from app.config import settings
 
 
@@ -33,29 +34,30 @@ def to_title_case(text: str) -> str:
     return " ".join(word[0].upper() + word[1:].lower() for word in text.split())
 
 
-def get_topic(text: str) -> str:
-    # print(f"INPUT TEXT FOR /topic : {text[:100]}..")
+def get_topic_combined(text: str) -> Tuple[str, Dict]:
+    """
+    Get both formatted topic string and raw topic data with a single API call
+
+    Returns:
+        Tuple containing (formatted_topic_string, raw_topic_data)
+    """
     print(f"INPUT TEXT FOR /topic : {text}..")
 
+    # Make topic API call once
     topic2score = predict_doc_multi_cls(settings.TOPIC_SERVING_URL, text)
 
-    # subtopic_url = SUBTOPIC_SERVING_URL
-    # subtopic_text = self.get_subtopic_text(topic2score.keys(), text)
-    # subtopic2score = predict_doc_multi_cls(subtopic_url, subtopic_text)
+    # Get subtopic data
+    subtopic_text = get_subtopic_text(topic2score.keys(), text)
+    subtopic2score = predict_doc_multi_cls(settings.SUBTOPIC_SERVING_URL, subtopic_text)
 
-    # result = {
-    #     "topic": topic2score,
-    #     "subtopic": subtopic2score
-    # }
-    # return result
+    # Format the topic string
     topics = topic2score.keys()
     if not topics:
         topics = ["unknown"]
-    topics = [to_title_case(t) for t in topics]
-    return ", ".join(topics)
+    formatted_topics = [to_title_case(t) for t in topics]
+    topic_string = ", ".join(formatted_topics)
 
+    # Create the raw topic data dictionary
+    topic_data = {"topic": topic2score, "subtopic": subtopic2score}
 
-if __name__ == "__main__":
-    text = "Forum B20 dorong kolaborasi publik dan swasta jalankan transisi energi. Forum dialog antar komunitas bisnis global B20 mendorong kolaborasi sektor publik dan swasta untuk menjalankan program transisi energi dalam mengurangi emisi dan menahan kenaikan rata-rata suhu bumi agar tidak melewati ambang batas 1,5 derajat Celcius."
-    topic = get_topic(text)
-    print(topic)
+    return topic_string, topic_data
